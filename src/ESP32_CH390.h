@@ -227,8 +227,15 @@ public:
 private:
   esp_eth_handle_t eth_handle;
   esp_netif_t *eth_netif;
+  void *eth_glue;
+  esp_eth_mac_t *eth_mac;
+  esp_eth_phy_t *eth_phy;
   bool initialized;
   bool dhcp_enabled;
+  bool driver_started;
+  bool eth_event_registered;
+  bool ip_event_registered;
+  bool spi_bus_owned;
   ch390_config_t ch390_config;
   char configured_hostname[33];
 
@@ -237,7 +244,7 @@ private:
   static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
                                    int32_t event_id, void *event_data);
   bool initializeEthernet();
-  void deinitializeEthernet();
+  bool deinitializeEthernet();
   esp_eth_mac_t *createMACDriver();
   esp_eth_phy_t *createPHYDriver();
 };

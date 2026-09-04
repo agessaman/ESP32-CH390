@@ -54,8 +54,15 @@ ESP32_CH390 CH390;
 ESP32_CH390::ESP32_CH390() {
   eth_handle = nullptr;
   eth_netif = nullptr;
+  eth_glue = nullptr;
+  eth_mac = nullptr;
+  eth_phy = nullptr;
   initialized = false;
   dhcp_enabled = true;
+  driver_started = false;
+  eth_event_registered = false;
+  ip_event_registered = false;
+  spi_bus_owned = false;
   memset(&ch390_config, 0, sizeof(ch390_config));
   configured_hostname[0] = '\0';
 }
@@ -65,6 +72,13 @@ ESP32_CH390::~ESP32_CH390() { end(); }
 bool ESP32_CH390::begin(ch390_config_t cfg) {
   if (initialized) {
     return true;
+  }
+
+  // A previous attempt may have failed after allocating only part of the
+  // driver stack. Always begin from a fully released state so callers can
+  // retry safely.
+  if (!deinitializeEthernet()) {
+    return false;
   }
 
   ch390_config = cfg;
@@ -100,9 +114,6 @@ bool ESP32_CH390::begin(int reset_gpio, int int_gpio, int mdc_gpio,
 }
 
 void ESP32_CH390::end() {
-  if (!initialized)
-    return;
-
   deinitializeEthernet();
   initialized = false;
 }
@@ -444,81 +455,136 @@ bool ESP32_CH390::initializeEthernet() {
     return false;
   }
 
+  const auto fail = [&]() {
+    deinitializeEthernet();
+    return false;
+  };
+
   esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
   eth_netif = esp_netif_new(&netif_cfg);
   if (!eth_netif) {
-    return false;
+    return fail();
   }
   if (configured_hostname[0] != '\0' &&
       esp_netif_set_hostname(eth_netif, configured_hostname) != ESP_OK) {
-    esp_netif_destroy(eth_netif);
-    eth_netif = nullptr;
-    return false;
+    return fail();
   }
 
-  esp_eth_mac_t *mac = createMACDriver();
-  esp_eth_phy_t *phy = createPHYDriver();
+  eth_mac = createMACDriver();
+  eth_phy = createPHYDriver();
 
-  if (!mac || !phy) {
-    return false;
+  if (!eth_mac || !eth_phy) {
+    return fail();
   }
 
-  esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
+  esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(eth_mac, eth_phy);
 
   esp_err_t ret = esp_eth_driver_install(&eth_config, &eth_handle);
   if (ret != ESP_OK) {
-    return false;
+    return fail();
   }
-
 #if __has_include("esp_eth_netif_glue.h")
-  void *glue = esp_eth_new_netif_glue(eth_handle);
-  if (!glue) {
-    return false;
+  eth_glue = esp_eth_new_netif_glue(eth_handle);
+  if (!eth_glue) {
+    return fail();
   }
-  ret = esp_netif_attach(eth_netif, glue);
+  ret = esp_netif_attach(eth_netif, eth_glue);
   if (ret != ESP_OK) {
-    return false;
+    return fail();
   }
 #else
-  return false;
+  return fail();
 #endif
 
   err = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
                                    &eth_event_handler, this);
   if (err != ESP_OK) {
-    return false;
+    return fail();
   }
+  eth_event_registered = true;
 
   err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                    &got_ip_event_handler, this);
   if (err != ESP_OK) {
-    return false;
+    return fail();
   }
+  ip_event_registered = true;
 
   ret = esp_eth_start(eth_handle);
   if (ret != ESP_OK) {
-    return false;
+    return fail();
   }
+  driver_started = true;
 
   initialized = true;
   return true;
 }
 
-void ESP32_CH390::deinitializeEthernet() {
-  if (eth_handle) {
-    esp_eth_stop(eth_handle);
-    esp_eth_driver_uninstall(eth_handle);
-    eth_handle = nullptr;
+bool ESP32_CH390::deinitializeEthernet() {
+  initialized = false;
+
+  if (driver_started && eth_handle) {
+    const esp_err_t ret = esp_eth_stop(eth_handle);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+      return false;
+    }
+    driver_started = false;
   }
+
+  if (ip_event_registered) {
+    if (esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP,
+                                     &got_ip_event_handler) != ESP_OK) {
+      return false;
+    }
+    ip_event_registered = false;
+  }
+  if (eth_event_registered) {
+    if (esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID,
+                                     &eth_event_handler) != ESP_OK) {
+      return false;
+    }
+    eth_event_registered = false;
+  }
+
+#if __has_include("esp_eth_netif_glue.h")
+  if (eth_glue) {
+    if (esp_eth_del_netif_glue(
+            static_cast<esp_eth_netif_glue_handle_t>(eth_glue)) != ESP_OK) {
+      return false;
+    }
+    eth_glue = nullptr;
+  }
+#endif
 
   if (eth_netif) {
     esp_netif_destroy(eth_netif);
     eth_netif = nullptr;
   }
 
-  esp_event_handler_unregister(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler);
-  esp_event_handler_unregister(IP_EVENT, IP_EVENT_ETH_GOT_IP,
-                               &got_ip_event_handler);
+  if (eth_handle) {
+    if (esp_eth_driver_uninstall(eth_handle) != ESP_OK) {
+      return false;
+    }
+    eth_handle = nullptr;
+  }
+
+  if (eth_mac) {
+    eth_mac->del(eth_mac);
+    eth_mac = nullptr;
+  }
+  if (eth_phy) {
+    eth_phy->del(eth_phy);
+    eth_phy = nullptr;
+  }
+
+  if (spi_bus_owned) {
+    if (spi_bus_free(static_cast<spi_host_device_t>(ch390_config.spi_host)) !=
+        ESP_OK) {
+      return false;
+    }
+    spi_bus_owned = false;
+  }
+  return true;
 }
 
 esp_eth_mac_t *ESP32_CH390::createMACDriver() {
@@ -544,6 +610,7 @@ esp_eth_mac_t *ESP32_CH390::createMACDriver() {
   if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
     return nullptr;
   }
+  spi_bus_owned = ret == ESP_OK;
 
   static spi_device_interface_config_t devcfg = {};
   devcfg.command_bits = 1; // CH390 SPI frame: 1 opcode bit + 7 address bits

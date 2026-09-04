@@ -98,6 +98,11 @@ If `mac_addr` is left zeroed, the ESP32's factory Ethernet MAC is used.
 - `bool begin(ch390_config_t config)`
 - `void end()`
 
+Initialization is transactional: a failed `begin()` releases any partially
+created MAC, PHY, netif, event-handler, glue, and library-owned SPI resources.
+It is therefore safe to retry `begin()`. `end()` performs the same complete
+cleanup and a later `begin()` may start the interface again.
+
 ### Network
 
 - `bool config(IPAddress ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = 0, IPAddress dns2 = 0)`
