@@ -128,15 +128,17 @@ void setup() {
   config.int_gpio = 4;          // Interrupt pin
   memcpy(config.mac_addr, customMAC, 6);
 
+  // Store the hostname before Ethernet starts so the first DHCP request uses it.
+  if (!CH390.setHostname("esp32-ch390-advanced")) {
+    Serial.println("Invalid hostname");
+    return;
+  }
+
   // Initialize CH390
   Serial.println("Initializing CH390 Ethernet...");
   if (CH390.begin(config)) {
     Serial.println("CH390 initialized successfully");
-
-    // Set hostname
-    if (CH390.setHostname("esp32-ch390-advanced")) {
-      Serial.println("Hostname set to: esp32-ch390-advanced");
-    }
+    Serial.println("Hostname set to: esp32-ch390-advanced");
 
     // Enable DHCP
     if (CH390.enableDHCP()) {

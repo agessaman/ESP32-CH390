@@ -57,6 +57,7 @@ ESP32_CH390::ESP32_CH390() {
   initialized = false;
   dhcp_enabled = true;
   memset(&ch390_config, 0, sizeof(ch390_config));
+  configured_hostname[0] = '\0';
 }
 
 ESP32_CH390::~ESP32_CH390() { end(); }
@@ -347,12 +348,22 @@ bool ESP32_CH390::setMACAddress(const char *mac) {
   return false;
 }
 
-bool ESP32_CH390::setHostname(const char *hostname) {
-  if (!initialized || !eth_netif || !hostname)
+bool ESP32_CH390::setHostname(const char *new_hostname) {
+  if (!new_hostname)
     return false;
 
-  esp_err_t ret = esp_netif_set_hostname(eth_netif, hostname);
-  return ret == ESP_OK;
+  const size_t hostname_length = strlen(new_hostname);
+  if (hostname_length >= sizeof(configured_hostname))
+    return false;
+
+  if (initialized) {
+    if (!eth_netif || esp_netif_set_hostname(eth_netif, new_hostname) != ESP_OK) {
+      return false;
+    }
+  }
+
+  memcpy(configured_hostname, new_hostname, hostname_length + 1);
+  return true;
 }
 
 const char *ESP32_CH390::getHostname() {
@@ -435,6 +446,15 @@ bool ESP32_CH390::initializeEthernet() {
 
   esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
   eth_netif = esp_netif_new(&netif_cfg);
+  if (!eth_netif) {
+    return false;
+  }
+  if (configured_hostname[0] != '\0' &&
+      esp_netif_set_hostname(eth_netif, configured_hostname) != ESP_OK) {
+    esp_netif_destroy(eth_netif);
+    eth_netif = nullptr;
+    return false;
+  }
 
   esp_eth_mac_t *mac = createMACDriver();
   esp_eth_phy_t *phy = createPHYDriver();

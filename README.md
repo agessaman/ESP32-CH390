@@ -102,7 +102,11 @@ If `mac_addr` is left zeroed, the ESP32's factory Ethernet MAC is used.
 
 - `bool config(IPAddress ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = 0, IPAddress dns2 = 0)`
 - `bool enableDHCP()` / `bool disableDHCP()`
-- `bool setHostname(const char *hostname)` / `const char *getHostname()`
+- `bool setHostname(const char *hostname)` stores a hostname of up to 32
+  characters for the next `begin()` and also applies it to an initialized
+  interface. Set it before `begin()` so the first DHCP request includes it.
+  A post-start change is advertised after the interface reconnects.
+- `const char *getHostname()`
 
 ### Status
 
